@@ -1,0 +1,238 @@
+<?php
+/**
+ * @file
+ * Code for the Vehicle reservation feature.
+ */
+
+include_once 'vehicle_reservation.features.inc';
+
+/**
+ * hook_form_alter
+ */
+
+function vehicle_reservation_form_alter (&$form, &$form_state, $form_id) {
+
+ if ($form['#id'] == 'vehicle-reservation-node-form') {
+
+    $form['#validate'][] = 'vehicle_reservation_form_validate';
+
+    $form['cancel'] = array(
+        '#type' => 'button',
+        '#value' => t('Cancel'),
+        '#prefix' => '&nbsp; &nbsp; &nbsp;',
+        '#attributes' => array('onClick' => 'location.replace("/vehicle/calendar"); return false;'),
+        '#post_render' => array('vehicle_reservation_change_button_type'),
+        '#weight' => 999,
+    );
+    return $form;
+  }
+}
+
+/*
+ * Switch submit to button
+ */
+function vehicle_reservation_change_button_type($markup, $element) {
+    $markup = str_replace('type="submit', 'type="button', $markup);
+    return $markup;
+}
+
+/*
+ * Add validation here
+ */
+function vehicle_reservation_form_validate($form, &$form_state) {
+  if ($form['#id'] == 'vehicle-reservation-node-form') {
+    $tid = $form_state['input']['field_which_vehicle']['und'];
+    if (isset($form_state['node']->nid)) {
+      $this_node = $form_state['node']->nid;
+    } else {
+      $this_node = 0;
+    }
+    // dpm($this_node);
+
+    // need to handle UTC database date storage in query
+    $timezone = new DateTimeZone(date_default_timezone());
+
+    $start_date = $form_state['input']['field_start_date']['und'][0]['value']['date'];
+    $start_time = $form_state['input']['field_start_date']['und'][0]['value']['time'];
+    $trip_start = new DateTime($start_date . ' ' . $start_time, $timezone);
+    $trip_start_date = date_format($trip_start ,'Y-m-d H:i:s');
+
+    $end_date = $form_state['input']['field_start_date']['und'][0]['value2']['date'];
+    $end_time = $form_state['input']['field_start_date']['und'][0]['value2']['time'];
+    $trip_end = new DateTime($end_date . ' ' . $end_time, $timezone);
+    $trip_end_date = date_format($trip_end ,'Y-m-d H:i:s');
+
+    // database stored as UTC, need to offset so query will work
+    $offset = $timezone->getOffset($trip_start);
+    $trip_start_date_offset = date('Y-m-d H:i:s', $trip_start->format('U') - $offset);
+    $trip_end_date_offset = date('Y-m-d H:i:s', $trip_end->format('U') - $offset);
+    // dpm($trip_start_date_offset);
+    // dpm($trip_end_date_offset);
+
+    // find anny trips at same time
+    $conflicting_dates = db_query("
+      SELECT entity_id
+       FROM {field_data_field_start_date} s
+        where
+          bundle = 'vehicle_reservation' and
+          entity_id != :entity_id and
+          (
+          (:trip_start >= s.field_start_date_value
+          and :trip_start <= s.field_start_date_value2)
+          or
+          (:trip_end >= s.field_start_date_value
+          and :trip_end <= s.field_start_date_value2)
+          or
+          (:trip_start <= s.field_start_date_value
+          and :trip_end >= s.field_start_date_value2)
+          )",
+      array(':entity_id' => $this_node,
+            ':trip_start' => $trip_start_date_offset,
+            ':trip_end' => $trip_end_date_offset));
+    // loop through results, see if for same car
+    foreach($conflicting_dates as $record) {
+      // dpm($record->entity_id);
+      $vehicle_rec = db_query("
+        select field_which_vehicle_tid
+        from field_data_field_which_vehicle
+        where bundle = 'vehicle_reservation'
+        and entity_id = :entity_id
+        and field_which_vehicle_tid = :which_tid",
+      array(':entity_id' => $record->entity_id,
+            ':which_tid' => $tid));
+      foreach($vehicle_rec as $vehicle) {
+        form_set_error('field_which_vehicle', 'This vehicle is already reserved at that time. <a href="/'.drupal_get_path_alias('node/'.$record->entity_id).'"">View reservation here</a>.');
+      }
+
+    }
+
+    // validate odometer reading
+    if (isset($form_state['input']['field_beginning_mileage']) and isset($form_state['input']['field_ending_mileage'])) {
+      if ($form_state['input']['field_beginning_mileage']['und'][0]['value'] > $form_state['input']['field_ending_mileage']['und'][0]['value'])
+        form_set_error('field_beginning_mileage', 'Beginning mileage is greater than ending mileage.');
+    }
+  }
+}
+
+/**
+ * hook_node_submit
+ *   submit does not have NID for node yet, use hook insert and update to send email
+ */
+
+// function vehicle_reservation_node_submit($node, $form, &$form_state) {
+
+// }
+
+/**
+ * hook_node_insert
+ */
+
+function vehicle_reservation_node_insert($node) {
+ if ($node->type == 'vehicle_reservation') {
+
+    if (isset($node->field_email)) {
+
+      global $user;
+
+      $to = $node->field_email['und'][0]['value'];
+      $params = array(
+        'node' => $node,
+        'sender' => $user,
+      );
+
+      // first parm hooks to vehicle_reservation_email
+      // email confirmation to user
+      drupal_mail('vehicle_reservation', 'vehicle reservation', $to, LANGUAGE_NONE, $params);
+      $_GET['destination'] = 'vehicle/calendar';
+
+    }
+  }
+
+}
+
+/**
+ * hook_node_update
+ */
+
+function vehicle_reservation_node_update($node) {
+ if ($node->type == 'vehicle_reservation') {
+
+    if (isset($node->field_email)) {
+
+      global $user;
+
+      $to = $node->field_email['und'][0]['value'];
+      $params = array(
+        'node' => $node,
+        'sender' => $user,
+      );
+
+      // first parm hooks to vehicle_reservation_email
+      // email confirmation to user
+      drupal_mail('vehicle_reservation', 'vehicle reservation', $to, LANGUAGE_NONE, $params);
+      $_GET['destination'] = 'vehicle/calendar';
+
+    }
+  }
+
+}
+
+/**
+ * Implements hook_mail().
+ *
+ * Handles submit of mail.
+ */
+function vehicle_reservation_mail($key, &$message, $params) {
+  // drupal_set_message('<p>tid:</p><pre>'. print_r($params['node'], TRUE) .'</pre>');
+  $vehicle_tid = $params['node']->field_which_vehicle['und'][0]['tid'];
+  $vehicle_term = taxonomy_term_load($vehicle_tid);
+
+  $node_url = 'vehicle/' . $params['node']->nid;
+
+  $message['headers']['Reply-To'] = 'no-reply@cals.cornell.edu';
+  $message['headers']['From'] = 'no-reply@cals.cornell.edu';
+
+  $message['subject'] = t('Information about your car reservation '.$params['node']->field_start_date['und'][0]['value']);
+  $message['from'] = 'no-reply@cals.cornell.edu';
+  $message['body'] = array(
+    t('Your car reservation was successful. You are scheduled for the @vehicle at this date and time: @travel_time', array(
+        '@vehicle' => $vehicle_term->name,
+        '@travel_time' => $params['node']->field_start_date['und'][0]['value'])),
+    t('You can view or edit it here:'),
+    url($node_url, array('absolute' => TRUE)),
+  );
+
+}
+
+/**
+ * hook_node_delete
+ */
+
+function vehicle_reservation_node_delete($node) {
+  if ($node->type == 'vehicle_reservation') {
+    $_GET['destination'] = 'vehicle/calendar';
+  }
+}
+
+/**
+ * Implements hook_date_formats().
+ */
+function vehicle_reservation_date_formats() {
+  return array(
+    // Creates a new time format.
+    array(
+      'type' => 'time',
+      'format' => 'h:i:s a',
+      'locales' => array(),
+    ),
+  );
+}
+
+/**
+ * Implements hook_date_format_types().
+ */
+function vehicle_reservation_date_format_types() {
+  return array(
+    'time' => t('Time'),
+  );
+}
